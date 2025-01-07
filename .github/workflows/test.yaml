@@ -1,0 +1,155 @@
+name: Patch Mikrotik RouterOS 7.x
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CUSTOM_LICENSE_PRIVATE_KEY: ${{ secrets.CUSTOM_LICENSE_PRIVATE_KEY }}
+  CUSTOM_LICENSE_PUBLIC_KEY: ${{ secrets.CUSTOM_LICENSE_PUBLIC_KEY }}
+  CUSTOM_NPK_SIGN_PRIVATE_KEY: ${{ secrets.CUSTOM_NPK_SIGN_PRIVATE_KEY }}
+  CUSTOM_NPK_SIGN_PUBLIC_KEY: ${{ secrets.CUSTOM_NPK_SIGN_PUBLIC_KEY }}
+  MIKRO_LICENSE_URL: ${{ secrets.MIKRO_LICENSE_URL }}
+  CUSTOM_LICENSE_URL: ${{ secrets.CUSTOM_LICENSE_URL }}
+  MIKRO_UPGRADE_URL: ${{ secrets.MIKRO_UPGRADE_URL }}
+  CUSTOM_UPGRADE_URL: ${{ secrets.CUSTOM_UPGRADE_URL }}
+
+jobs:
+  Set_BuildTime:
+    runs-on: runs-on: ubuntu-latest
+    outputs:
+      BUILD_TIME: ${{ steps.set_buildtime.outputs.BUILD_TIME }}
+    steps:
+      - name: Set build time
+        id: set_buildtime
+        run: echo "BUILD_TIME=$(date +'%s')" >> $GITHUB_OUTPUT
+
+  Patch_RouterOS:
+    needs: Set_BuildTime
+    runs-on: runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [x86, arm64]
+        channel: [stable, testing]
+    env:
+      TZ: 'Asia/Shanghai'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Get latest RouterOS version
+        id: get_latest
+        run: |
+          set -e
+          LATEST_VERSION=$(wget -q -O - https://${{ env.MIKRO_UPGRADE_URL }}/routeros/NEWESTa7.${{ matrix.channel }} | cut -d ' ' -f1)
+          echo "Latest Version: $LATEST_VERSION"
+          echo "LATEST_VERSION=$LATEST_VERSION" >> $GITHUB_ENV
+          
+          if [ "${{ github.event_name }}" == "schedule" ]; then
+            _LATEST_VERSION=$(wget -q -O - https://${{ env.CUSTOM_UPGRADE_URL }}/routeros/NEWESTa7.${{ matrix.channel }} | cut -d ' ' -f1)
+            if [ "$_LATEST_VERSION" == "$LATEST_VERSION" ]; then
+              echo "No new version found."
+              echo "has_new_version=false" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          fi
+          echo "has_new_version=true" >> $GITHUB_OUTPUT
+
+      - name: Cache Squashfs
+        if: steps.get_latest.outputs.has_new_version == 'true'
+        id: cache-squashfs
+        uses: actions/cache@v4
+        with:
+          path: |
+            python3.sfs
+            option.sfs
+          key: busybox-python3-squashfs-${{ matrix.arch }}
+
+      - name: Create Squashfs for Python3 and Option
+        if: steps.get_latest.outputs.has_new_version == 'true' && steps.cache-squashfs.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          sudo mkdir -p ./option-root/bin/
+          if [ "${{ matrix.arch }}" == "x86" ]; then
+            sudo cp busybox/busybox_x86 ./option-root/bin/busybox
+            sudo chmod +x ./option-root/bin/busybox
+          elif [ "${{ matrix.arch }}" == "arm64" ]; then
+            sudo cp busybox/busybox_aarch64 ./option-root/bin/busybox
+            sudo chmod +x ./option-root/bin/busybox
+          fi
+          sudo mksquashfs option-root option.sfs -quiet -comp xz -no-xattrs -b 256k
+          sudo rm -rf option-root
+
+          if [ "${{ matrix.arch }}" == "x86" ]; then
+            sudo wget -q -O cpython.tar.gz hhttps://github.com/astral-sh/python-build-standalone/releases/download/20250106/cpython-3.11.11+20250106-x86_64-unknown-linux-musl-install_only_stripped.tar.gz
+          elif [ "${{ matrix.arch }}" == "arm64" ]; then
+            sudo wget -q -O cpython.tar.gz https://github.com/astral-sh/python-build-standalone/releases/download/20250106/cpython-3.11.11+20250106-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz
+          fi
+          sudo tar -xf cpython.tar.gz
+          sudo mksquashfs python python3.sfs -quiet -comp xz -no-xattrs -b 256k
+          sudo rm -rf python
+
+    - name: Create Release
+      if: steps.get_latest.outputs.has_new_version == 'true'
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: nightly-${{ env.LATEST_VERSION }}-${{ matrix.arch }}
+        release_name: Nightly Build ${{ env.LATEST_VERSION }} (${ matrix.arch })
+        draft: false
+        prerelease: true
+        body: |
+          Nightly build for MikroTik RouterOS version ${{ env.LATEST_VERSION }} (${ matrix.arch }).
+          - Build time: ${{ needs.Set_BuildTime.outputs.BUILD_TIME }}
+          - Changelog:
+          ```
+          $(cat CHANGELOG)
+          ```
+        files: |
+          mikrotik-${{ env.LATEST_VERSION }}${{ env.ARCH }}.iso
+          all_packages-${{ matrix.arch }}-${{ env.LATEST_VERSION }}.zip
+          install-image-${{ env.LATEST_VERSION }}.img
+
+    - name: Upload Release Artefacts
+      if: steps.get_latest.outputs.has_new_version == 'true'
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: mikrotik-${{ env.LATEST_VERSION }}${{ env.ARCH }}.iso
+        asset_name: mikrotik-${{ env.LATEST_VERSION }}${{ env.ARCH }}.iso
+        asset_content_type: application/x-iso9660-image
+
+    - name: Upload All Packages
+      if: steps.get_latest.outputs.has_new_version == 'true'
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: all_packages-${{ matrix.arch }}-${{ env.LATEST_VERSION }}.zip
+        asset_name: all_packages-${{ matrix.arch }}-${{ env.LATEST_VERSION }}.zip
+        asset_content_type: application/zip
+
+    - name: Upload Install Image
+      if: steps.get_latest.outputs.has_new_version == 'true'
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: install-image-${{ env.LATEST_VERSION }}.img
+        asset_name: install-image-${{ env.LATEST_VERSION }}.img
+        asset_content_type: application/octet-stream
