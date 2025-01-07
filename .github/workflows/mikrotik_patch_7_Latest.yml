@@ -29,7 +29,7 @@ env:
 
 jobs:
   Set_BuildTime:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       BUILD_TIME: ${{ steps.set_buildtime.outputs.BUILD_TIME }}
     steps:
@@ -39,7 +39,7 @@ jobs:
 
   Patch_RouterOS:
     needs: Set_BuildTime
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         arch: [x86,arm64]
@@ -62,10 +62,10 @@ jobs:
       id: get_latest
       run: |
         echo $(uname -a)
-        LATEST_VERSION=$(wget -nv -O - https://${{ env.MIKRO_UPGRADE_URL }}/routeros/NEWESTa7.${{ matrix.channel }} | cut -d ' ' -f1)
+        LATEST_VERSION=$(wget -nv -O - https://download.mikrotik.com/routeros/NEWESTa7.${{ matrix.channel }} | cut -d ' ' -f1)
         echo Latest Version:$LATEST_VERSION
         if [ "${{ github.event_name }}" == "schedule" ]; then
-          _LATEST_VERSION=$(wget -nv -O - https://${{ env.CUSTOM_UPGRADE_URL }}/routeros/NEWESTa7.${{ matrix.channel }} | cut -d ' ' -f1)
+          _LATEST_VERSION=$(wget -nv -O - https://download.mikrotik.com/routeros/NEWESTa7.${{ matrix.channel }} | cut -d ' ' -f1)
           if [ "$_LATEST_VERSION" == "$LATEST_VERSION" ]; then
             echo "No new version found"
             echo "has_new_version=false" >> $GITHUB_OUTPUT
